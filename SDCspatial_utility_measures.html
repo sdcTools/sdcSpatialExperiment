@@ -241,16 +241,7 @@ rbind(mismatch_sm, mismatch_sm - true_mass)</code></pre>
 <pre><code>##                 true smoothing smoothing (with pad)
 ## mismatch_sm 80324282  80324264             80324282
 ##                    0       -18                    0</code></pre>
-<p>Alternatively, we might do the smoothing without edge corrections, but that may leave us with edge effects.</p>
-<pre class="r"><code>pop_ras_sm_edg &lt;- protect_smooth(pop_ras, bw = bwidth, pad = FALSE)
 
-mass_sm_edg  &lt;- sum(getValues(pop_ras_sm_edg$value$count), na.rm = TRUE)
-mismatch_edg &lt;- as.integer(c(true_mass, mass_sm, mass_sm_pad))
-names(mismatch_edg) &lt;- c(&quot;true&quot;, &quot;smoothing (with pad)&quot;, &quot;smoothing (no edge corr.)&quot;)
-rbind(mismatch_edg, mismatch_sm - true_mass)</code></pre>
-<pre><code>##                  true smoothing (with pad) smoothing (no edge corr.)
-## mismatch_edg 80324282             80324264                  80324282
-##                     0                  -18                         0</code></pre>
 <p>A smaller example for real-time calculation:</p>
 <pre class="r"><code>data(&quot;dwellings&quot;)
 
