@@ -1,0 +1,237 @@
+---
+title: "Reproducible example of current open issues with the SpatialKWD package"
+output:
+  html_document:
+    df_print: paged
+    toc: true
+---
+
+2023-08-03
+
+## 1. Preparing example data
+
+```{r}
+library(SpatialKWD)
+library(sp)
+library(raster)
+library(sdcSpatial)
+```
+
+The issues are illustrated by means of an example data set from the sdcSpatial package called
+'dwellings'. The first step is to create the unprotected raster map, which forms the
+ground truth. 
+
+The example uses a map of counts (no. of units per grid cell), with 200m $\times$ 
+200m grid cells in a 62 $\times$ 61 cells raster map.
+
+```{r}
+data("dwellings")
+
+dw <- sdcSpatial::sdc_raster(dwellings[, c("x", "y")], 
+                             variable = 1, r = 200,
+                             max_risk = .8, min_count = 10)
+
+ras_orig <- dw$value$count # original raster
+
+raster::plot(ras_orig, main = "no. of dwellings") # map
+ras_orig # raster info
+```
+
+Next, we create the altered raster maps using three protection methods:
+1) suppression of sensitive cells (remove_sensitive),
+2) quadtree method (protect_quadtree),
+3) kernel smoothing (protect_smooth).
+
+```{r}
+# apply protection methods
+dw_rm <- remove_sensitive(dw)
+dw_qt <- protect_quadtree(dw, max_zoom = 2)
+dw_sm <- protect_smooth(dw, bw = 200)
+
+# extract protected rasters from sdcSpatial object
+ras_rm <- dw_rm$value$count
+ras_qt <- dw_qt$value$count
+ras_sm <- dw_sm$value$count
+```
+
+Following up, we select a square focus area. It is identified by its centroid and 
+radius.
+
+```{r}
+# Focus area (square)
+
+fa_ctrd <- c(155100, 464100) # center of focus area
+fa_rads <- 3000              # radius of focus area
+
+
+# maps
+
+par(mfrow = c(2, 2))
+
+plot(ras_orig, main = "original")
+rect(xleft = fa_ctrd[1] - fa_rads, xright = fa_ctrd[1] + fa_rads,
+     ybottom = fa_ctrd[2] - fa_rads, ytop = fa_ctrd[2] + fa_rads, border = "red")
+plot(ras_rm, main = "cell suppression")
+rect(xleft = fa_ctrd[1] - fa_rads, xright = fa_ctrd[1] + fa_rads,
+     ybottom = fa_ctrd[2] - fa_rads, ytop = fa_ctrd[2] + fa_rads, border = "red")
+plot(ras_qt, main = "quad tree method")
+rect(xleft = fa_ctrd[1] - fa_rads, xright = fa_ctrd[1] + fa_rads,
+     ybottom = fa_ctrd[2] - fa_rads, ytop = fa_ctrd[2] + fa_rads, border = "red")
+plot(ras_sm, main = "smoothing method")
+rect(xleft = fa_ctrd[1] - fa_rads, xright = fa_ctrd[1] + fa_rads,
+     ybottom = fa_ctrd[2] - fa_rads, ytop = fa_ctrd[2] + fa_rads, border = "red")
+
+par(mfrow = c(1, 1))
+```
+
+
+## 2. FocusArea sometimes returns zero for clear differences
+
+We continue by evaluating the difference between altered maps and ground truth with 
+respect to the chosen focus area.
+
+This involves the following steps:
+1) extract the center coordinates of tiles (raster::xyFromCell),
+2) extract the tile-values (weights) (raster::getValues) [where NA-values are
+treated as zeros].
+
+```{r}
+# extract coordinates from raster
+xy <- raster::xyFromCell(ras_orig, 1:ncell(ras_orig))
+
+# extract cell values from rasters
+w_orig <- raster::getValues(ras_orig)
+w_rm   <- raster::getValues(ras_rm)
+w_qt   <- raster::getValues(ras_qt)
+w_sm   <- raster::getValues(ras_sm)
+
+# treat NA-nodes as having zero weight
+w_orig[is.na(w_orig)] <- 0
+w_rm[is.na(w_rm)] <- 0
+w_qt[is.na(w_qt)] <- 0
+w_sm[is.na(w_sm)] <- 0
+```
+
+Using these inputs we calculate the first set of KWDs.
+
+```{r}
+kwd_rm <- SpatialKWD::focusArea(Coordinates = xy, Weights = cbind(w_orig, w_rm),
+                                L = 3, recode = TRUE, area = "linf",
+                                x = fa_ctrd[1], y = fa_ctrd[2], radius = fa_rads)
+kwd_qt <- SpatialKWD::focusArea(Coordinates = xy, Weights = cbind(w_orig, w_qt),
+                                L = 3, recode = TRUE, area = "linf",
+                                x = fa_ctrd[1], y = fa_ctrd[2], radius = fa_rads)
+kwd_sm <- SpatialKWD::focusArea(Coordinates = xy, Weights = cbind(w_orig, w_sm),
+                                L = 3, recode = TRUE, area = "linf",
+                                x = fa_ctrd[1], y = fa_ctrd[2], radius = fa_rads)
+```
+
+Even though the suppression map is clearly different (all cells with < 10 units are 
+removed, see maps above), we get a KWD of zero.
+
+```{r}
+c(kwd_rm$distance, kwd_qt$distance, kwd_sm$distance)
+```
+
+Second try: The description of the focusArea function tells us that "All the weights outside 
+the focus area should be equal to zero." We create new rasters, where all tiles outside
+the focus area are assigned zero values.
+
+```{r}
+ex_fa <- extent(fa_ctrd[1] - (fa_rads - 100), fa_ctrd[1] + (fa_rads - 100),
+                fa_ctrd[2] - (fa_rads - 100), fa_ctrd[2] + (fa_rads - 100))
+clls_fa <- cellsFromExtent(ras_orig, ex_fa)
+
+ras_rm_fa <- ras_rm
+ras_qt_fa <- ras_qt
+ras_sm_fa <- ras_sm
+ras_rm_fa[-clls_fa] <- 0
+ras_qt_fa[-clls_fa] <- 0
+ras_sm_fa[-clls_fa] <- 0
+
+
+par(mfrow = c(2, 2))
+
+plot(ras_orig, main = "original")
+rect(xleft = fa_ctrd[1] - fa_rads, xright = fa_ctrd[1] + fa_rads,
+     ybottom = fa_ctrd[2] - fa_rads, ytop = fa_ctrd[2] + fa_rads, border = "red")
+plot(ras_rm_fa, main = "cell suppression (focus area)")
+rect(xleft = fa_ctrd[1] - fa_rads, xright = fa_ctrd[1] + fa_rads,
+     ybottom = fa_ctrd[2] - fa_rads, ytop = fa_ctrd[2] + fa_rads, border = "red")
+plot(ras_qt_fa, main = "quad tree method (focus area)")
+rect(xleft = fa_ctrd[1] - fa_rads, xright = fa_ctrd[1] + fa_rads,
+     ybottom = fa_ctrd[2] - fa_rads, ytop = fa_ctrd[2] + fa_rads, border = "red")
+plot(ras_sm_fa, main = "smoothing method (focus area)")
+rect(xleft = fa_ctrd[1] - fa_rads, xright = fa_ctrd[1] + fa_rads,
+     ybottom = fa_ctrd[2] - fa_rads, ytop = fa_ctrd[2] + fa_rads, border = "red")
+
+par(mfrow = c(1, 1))
+```
+
+With these we re-calculate the KWDs.
+
+```{r}
+# updated weights (zero outside focus area)
+w_rm_fa <- getValues(ras_rm_fa)
+w_qt_fa <- getValues(ras_qt_fa)
+w_sm_fa <- getValues(ras_sm_fa)
+w_rm_fa[is.na(w_rm_fa)] <- 0
+w_qt_fa[is.na(w_qt_fa)] <- 0
+w_sm_fa[is.na(w_sm_fa)] <- 0
+
+kwd_rm_fa <- SpatialKWD::focusArea(Coordinates = xy, Weights = cbind(w_orig, w_rm_fa),
+                                   L = 3, recode = TRUE, area = "linf",
+                                   x = fa_ctrd[1], y = fa_ctrd[2], radius = fa_rads)
+kwd_qt_fa <- SpatialKWD::focusArea(Coordinates = xy, Weights = cbind(w_orig, w_qt_fa),
+                                   L = 3, recode = TRUE, area = "linf",
+                                   x = fa_ctrd[1], y = fa_ctrd[2], radius = fa_rads)
+kwd_sm_fa <- SpatialKWD::focusArea(Coordinates = xy, Weights = cbind(w_orig, w_sm_fa),
+                                   L = 3, recode = TRUE, area = "linf",
+                                   x = fa_ctrd[1], y = fa_ctrd[2], radius = fa_rads)
+```
+
+We still get a KWD of zero for the 'removal' method. Furthermore, we now also get zero 
+for smoothing.
+
+```{r}
+c(kwd_rm_fa$distance, kwd_qt_fa$distance, kwd_sm_fa$distance)
+```
+
+
+## 3. How to apply a fixed cost to missing units of mass?
+
+Suppose now we look at the whole map rather than focus areas. Then, we might get 
+a mass mismatch, especially with removal:
+
+```{r}
+c(sum(w_orig), sum(w_rm))
+```
+
+There are ca. 2000 units missing after removal. We want to try solving the problem
+by assigning each a cost of half the map diagonal.
+
+```{r}
+# compute length of the diagonal in cells
+diag_cells <- sqrt(ncol(ras_orig)^2 + nrow(ras_orig)^2)
+# ... in meters
+diag_metrs <- diag_cells * 200
+
+# solve with extra artificial bin (?)
+kwd_rm_bal <- compareOneToOne(Coordinates = xy, Weights = cbind(w_orig, w_rm),
+                              L = 3, recode = TRUE,
+                              unbalanced = TRUE, unbal_cost = diag_metrs/2)
+```
+
+Again, this yields a distance of zero.
+
+```{r}
+kwd_rm_bal$distance
+```
+
+Do we get a distance of zero, because all non-zero tiles after removal match exactly? 
+(I.e. for any given tile the mass is missing completely or not at all.)
+
+Given that this is the case, we could, in principle, assign the costs manually 
+(2000 $\times c$ ).
+Still, intuitively the function should not return zero (?)
+
