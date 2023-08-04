@@ -1,0 +1,520 @@
+---
+title: "Reproducible examples of current open issues with the SpatialKWD package"
+date: "`r as.Date(Sys.time())`"
+output:
+  html_document:
+    df_print: paged
+    toc: true
+---
+
+
+# Example 1: Using `dwellings`-data from package `sdcSpatial`
+
+## 1. Preparing example data
+
+```{r}
+library(SpatialKWD)
+library(sp)
+library(raster)
+library(sdcSpatial)
+library(data.table)
+library(ggplot2)
+```
+
+The issues are illustrated by means of an example data set from the sdcSpatial package called
+'dwellings'. The first step is to create the unprotected raster map, which forms the
+ground truth. 
+
+The example uses a map of counts (no. of units per grid cell), with 200m $\times$ 
+200m grid cells in a 62 $\times$ 61 cells raster map.
+
+```{r}
+data("dwellings")
+
+dw <- sdcSpatial::sdc_raster(dwellings[, c("x", "y")], 
+                             variable = 1, r = 200,
+                             max_risk = .8, min_count = 10)
+
+ras_orig <- dw$value$count # original raster
+
+raster::plot(ras_orig, main = "no. of dwellings") # map
+ras_orig # raster info
+```
+
+Next, we create the altered raster maps using three protection methods:
+1) suppression of sensitive cells (remove_sensitive),
+2) quadtree method (protect_quadtree),
+3) kernel smoothing (protect_smooth).
+
+```{r}
+# apply protection methods
+dw_rm <- remove_sensitive(dw)
+dw_qt <- protect_quadtree(dw, max_zoom = 2)
+dw_sm <- protect_smooth(dw, bw = 200)
+
+# extract protected rasters from sdcSpatial object
+ras_rm <- dw_rm$value$count
+ras_qt <- dw_qt$value$count
+ras_sm <- dw_sm$value$count
+```
+
+Following up, we select a square focus area. It is identified by its centroid and 
+radius.
+
+```{r}
+# Focus area (square)
+
+fa_ctrd <- c(155100, 464100) # center of focus area
+fa_rads <- 3000              # radius of focus area
+
+
+# maps
+
+par(mfrow = c(2, 2))
+
+plot(ras_orig, main = "original")
+rect(xleft = fa_ctrd[1] - fa_rads, xright = fa_ctrd[1] + fa_rads,
+     ybottom = fa_ctrd[2] - fa_rads, ytop = fa_ctrd[2] + fa_rads, border = "red")
+plot(ras_rm, main = "cell suppression")
+rect(xleft = fa_ctrd[1] - fa_rads, xright = fa_ctrd[1] + fa_rads,
+     ybottom = fa_ctrd[2] - fa_rads, ytop = fa_ctrd[2] + fa_rads, border = "red")
+plot(ras_qt, main = "quad tree method")
+rect(xleft = fa_ctrd[1] - fa_rads, xright = fa_ctrd[1] + fa_rads,
+     ybottom = fa_ctrd[2] - fa_rads, ytop = fa_ctrd[2] + fa_rads, border = "red")
+plot(ras_sm, main = "smoothing method")
+rect(xleft = fa_ctrd[1] - fa_rads, xright = fa_ctrd[1] + fa_rads,
+     ybottom = fa_ctrd[2] - fa_rads, ytop = fa_ctrd[2] + fa_rads, border = "red")
+
+par(mfrow = c(1, 1))
+```
+
+
+## 2. FocusArea sometimes returns zero for clear differences
+
+We continue by evaluating the difference between altered maps and ground truth with 
+respect to the chosen focus area.
+
+#### First Try
+
+This involves the following steps:
+1) extract the center coordinates of tiles (raster::xyFromCell),
+2) extract the tile-values (weights) (raster::getValues) [where NA-values are
+treated as zeros].
+
+```{r}
+# extract coordinates from raster
+xy <- raster::xyFromCell(ras_orig, 1:ncell(ras_orig))
+
+# extract also coordinates in integer form
+xy_int <- cbind(as.numeric(as.factor(xy[,"x"])),
+                as.numeric(as.factor(xy[,"y"])))
+xy_center <- xy_int[xy[,"x"]==fa_ctrd[1] & xy[,"y"]==fa_ctrd[2],]
+r_int <- fa_rads/200
+
+# extract cell values from rasters
+w_orig <- raster::getValues(ras_orig)
+w_rm   <- raster::getValues(ras_rm)
+w_qt   <- raster::getValues(ras_qt)
+w_sm   <- raster::getValues(ras_sm)
+
+# treat NA-nodes as having zero weight
+w_orig[is.na(w_orig)] <- 0
+w_rm[is.na(w_rm)] <- 0
+w_qt[is.na(w_qt)] <- 0
+w_sm[is.na(w_sm)] <- 0
+```
+
+Using these inputs we calculate the first set of KWDs.
+
+```{r, results='hide'}
+w_protect <- list(w_rm,w_qt,w_sm)
+names(w_protect) <- c("removal","quadtree","smoothing")
+
+kwd <- list()
+for(n in names(w_protect)){
+  
+  weights <- cbind(w_orig, w_protect[[n]])
+  
+  kwd_n_direct <- SpatialKWD::focusArea(Coordinates = xy, Weights = weights,
+                                 L = 3, recode = TRUE, area = "linf",
+                                 x = fa_ctrd[1], y = fa_ctrd[2], radius = fa_rads)
+
+  kwd_n_int <- SpatialKWD::focusArea(Coordinates = xy_int, Weights = weights,
+                                      L = 3, area = "linf",
+                                      x = xy_center[1], y = xy_center[2], radius = r_int)
+  
+  kwd_n_int_exct <- SpatialKWD::focusArea(Coordinates = xy_int, Weights = weights,
+                                           method = "exact", area = "linf",
+                                           x = xy_center[1], y = xy_center[2], radius = r_int)
+  
+  kwd_n <- data.table(method = n, 
+                      distance_direct = kwd_n_direct$distance,
+                      distance_int = kwd_n_int$distance,
+                      distance_int_exct = kwd_n_int_exct$distance)
+  kwd <- c(kwd,list(kwd_n))
+}
+kwd <- rbindlist(kwd)
+```
+
+Even though the suppression map is clearly different (all cells with < 10 units are 
+removed, see maps above), we get a KWD of zero for `distance_direct`. Changing the inputs (`Coordinates`, `x`, `y`, `radius`) to integer values gives results. However specifying `method="approx"` (the default) or `method="exact"` yield exactly the same results.
+
+```{r}
+kwd
+```
+
+#### Second Try
+
+The description of the focusArea function tells us that "All the weights outside 
+the focus area should be equal to zero." We create new rasters, where all tiles outside
+the focus area are assigned zero values. 
+
+```{r}
+ex_fa <- extent(fa_ctrd[1] - (fa_rads - 100), fa_ctrd[1] + (fa_rads - 100),
+                fa_ctrd[2] - (fa_rads - 100), fa_ctrd[2] + (fa_rads - 100))
+clls_fa <- cellsFromExtent(ras_orig, ex_fa)
+
+ras_rm_fa <- ras_rm
+ras_qt_fa <- ras_qt
+ras_sm_fa <- ras_sm
+ras_rm_fa[-clls_fa] <- 0
+ras_qt_fa[-clls_fa] <- 0
+ras_sm_fa[-clls_fa] <- 0
+
+
+par(mfrow = c(2, 2))
+
+plot(ras_orig, main = "original")
+rect(xleft = fa_ctrd[1] - fa_rads, xright = fa_ctrd[1] + fa_rads,
+     ybottom = fa_ctrd[2] - fa_rads, ytop = fa_ctrd[2] + fa_rads, border = "red")
+plot(ras_rm_fa, main = "cell suppression (focus area)")
+rect(xleft = fa_ctrd[1] - fa_rads, xright = fa_ctrd[1] + fa_rads,
+     ybottom = fa_ctrd[2] - fa_rads, ytop = fa_ctrd[2] + fa_rads, border = "red")
+plot(ras_qt_fa, main = "quad tree method (focus area)")
+rect(xleft = fa_ctrd[1] - fa_rads, xright = fa_ctrd[1] + fa_rads,
+     ybottom = fa_ctrd[2] - fa_rads, ytop = fa_ctrd[2] + fa_rads, border = "red")
+plot(ras_sm_fa, main = "smoothing method (focus area)")
+rect(xleft = fa_ctrd[1] - fa_rads, xright = fa_ctrd[1] + fa_rads,
+     ybottom = fa_ctrd[2] - fa_rads, ytop = fa_ctrd[2] + fa_rads, border = "red")
+
+par(mfrow = c(1, 1))
+```
+
+With these we re-calculate the KWDs.
+
+```{r, results = 'hide'}
+# updated weights (zero outside focus area)
+w_rm_fa <- getValues(ras_rm_fa)
+w_qt_fa <- getValues(ras_qt_fa)
+w_sm_fa <- getValues(ras_sm_fa)
+w_rm_fa[is.na(w_rm_fa)] <- 0
+w_qt_fa[is.na(w_qt_fa)] <- 0
+w_sm_fa[is.na(w_sm_fa)] <- 0
+
+w_protect_fa <- list(w_rm_fa,w_qt_fa,w_sm_fa)
+names(w_protect_fa) <- c("removal","quadtree","smoothing")
+
+kwd_fa <- list()
+for(n in names(w_protect_fa)){
+  
+  weights <- cbind(w_orig, w_protect_fa[[n]])
+  
+  kwd_n_direct <- SpatialKWD::focusArea(Coordinates = xy, Weights = weights,
+                                        L = 3, recode = TRUE, area = "linf",
+                                        x = fa_ctrd[1], y = fa_ctrd[2], radius = fa_rads)
+  
+  kwd_n_int <- SpatialKWD::focusArea(Coordinates = xy_int, Weights = weights,
+                                     L = 3, area = "linf",
+                                     x = xy_center[1], y = xy_center[2], radius = r_int)
+  
+  kwd_n_int_exct <- SpatialKWD::focusArea(Coordinates = xy_int, Weights = weights,
+                                          method = "exact", area = "linf",
+                                          x = xy_center[1], y = xy_center[2], radius = r_int)
+  
+  kwd_n <- data.table(method = n, 
+                      distance_direct = kwd_n_direct$distance,
+                      distance_int = kwd_n_int$distance,
+                      distance_int_exct = kwd_n_int_exct$distance)
+  kwd_fa <- c(kwd_fa,list(kwd_n))
+}
+kwd_fa <- rbindlist(kwd_fa)
+```
+
+We now get a KWD of zero for the `removal` method and `smoothing` when using the input as is. Changing the input to integers beforehand we receive 0s for method `removal`. Since we cut of the boundaries of the focus area for the protected map and the function `SpatialKWD::focusArea()` expects equal mass for the `Weights`-input solving the problem for method `removal` should not be possible. 
+
+```{r}
+kwd_fa
+```
+
+#### Third try
+
+We suspect that the 0s pop up when the distance cannot be computed due to conflicting inputs. Next we set every weight to zero for the original map of the coordinates are outside the focus area. Then we will compare to the original protected maps, without cutting of inputs beyond the focus area, and change the order of the inputs for parameter `Weights`. First column will be the protected data, second the original. 
+
+
+```{r, results ='hide'}
+ras_orig_fa <- ras_orig
+ras_orig_fa[-clls_fa] <- 0
+
+w_orig_fa <- getValues(ras_orig_fa)
+w_orig_fa[is.na(w_orig_fa)] <- 0
+
+kwd_fa3 <- list()
+for(n in names(w_protect)){
+  
+  # Change order of inputs for weights
+  weights <- cbind(w_protect[[n]], w_orig_fa)
+  
+  kwd_n_direct <- SpatialKWD::focusArea(Coordinates = xy, Weights = weights,
+                                 L = 3, recode = TRUE, area = "linf",
+                                 x = fa_ctrd[1], y = fa_ctrd[2], radius = fa_rads)
+
+  kwd_n_int <- SpatialKWD::focusArea(Coordinates = xy_int, Weights = weights,
+                                      L = 3, area = "linf",
+                                      x = xy_center[1], y = xy_center[2], radius = r_int)
+  
+  kwd_n_int_exct <- SpatialKWD::focusArea(Coordinates = xy_int, Weights = weights,
+                                           method = "exact", area = "linf",
+                                           x = xy_center[1], y = xy_center[2], radius = r_int)
+  
+  kwd_n <- data.table(method = n, 
+                      distance_direct = kwd_n_direct$distance,
+                      distance_int = kwd_n_int$distance,
+                      distance_int_exct = kwd_n_int_exct$distance)
+  kwd_fa3 <- c(kwd_fa3,list(kwd_n))
+}
+kwd_fa3 <- rbindlist(kwd_fa3)
+```
+
+We now receive at least for `quadtree` and `removal` results for when using the original coordinates and the transformend integer-coordinates. It is still suspicious that the distance differs depending on the input. For `smoothing` we now receive only 0s. 
+
+```{r}
+kwd_fa3
+```
+
+## 3. How to apply a fixed cost to missing units of mass?
+
+Suppose now we look at the whole map rather than focus areas. Then, we might get 
+a mass mismatch, especially with removal:
+
+```{r}
+c(sum(w_orig), sum(w_rm))
+```
+
+There are ca. 2000 units missing after removal. We want to try solving the problem
+by assigning each a cost of half the map diagonal.
+
+```{r, results ='hide'}
+# compute length of the diagonal in cells
+diag_cells <- sqrt(ncol(ras_orig)^2 + nrow(ras_orig)^2)
+# ... in meters
+diag_metrs <- diag_cells * 200
+
+# solve with extra artificial bin (?)
+kwd_rm_bal <- compareOneToOne(Coordinates = xy, Weights = cbind(w_orig, w_rm),
+                              L = 3, recode = TRUE,
+                              unbalanced = TRUE, unbal_cost = diag_metrs/2)
+```
+
+Again, this yields a distance of zero.
+
+```{r}
+kwd_rm_bal$distance
+```
+
+
+When using `method = "exact"` we do however receive a distance.
+
+```{r, results ='hide'}
+kwd_rm_bal_exact <- compareOneToOne(Coordinates = xy, Weights = cbind(w_orig, w_rm),
+                              method="exact", recode = TRUE,
+                              unbalanced = TRUE, unbal_cost = diag_metrs/2)
+```
+
+```{r}
+kwd_rm_bal_exact$distance
+```
+
+According to the documentation when using `method = "approx"` (the default) the parameter `L` can specify how close the approximation should be. The higher the closer.
+
+```{r, results ='hide'}
+kwd_rm_bal_L100 <- compareOneToOne(Coordinates = xy, Weights = cbind(w_orig, w_rm),
+                                    L = 100, recode = TRUE,
+                                    unbalanced = TRUE, unbal_cost = diag_metrs/2)
+```
+
+Setting `L` very large does not change the issue with a 0 distance.
+
+```{r}
+kwd_rm_bal_L100$distance
+```
+
+
+# Example 2: Using own dummy data
+
+We generate our own dummy data on a predefined grid. The dummy data will contain an inner square where we can apply the protection and an outer border where populated grid cells are available to be used with 
+
+```{r}
+####
+# generate dummy data
+set.seed(123456)
+grid_width <- 101
+coordinates <- as.matrix(expand.grid(Xs=1:grid_width,Ys=1:grid_width))
+
+# generatet weight-vector
+w <- rep(0,nrow(coordinates))
+
+# populate central (square)
+center_square <- coordinates[,"Xs"] %between% c(36,66) & coordinates[,"Ys"] %between% c(36,66)
+coords_square <- coordinates[center_square,]
+distance_to_center <- sqrt(rowSums((coords_square-51)^2))
+w[center_square] <- round(rnorm(sum(center_square),
+                                mean = distance_to_center^(0.8),
+                                sd = log(distance_to_center+1)))
+
+# populate border
+border_square <- matrixStats::rowMaxs(abs( coordinates-51)) %between% c(40,45)
+w[border_square] <- 10
+w <- abs(w)
+
+# generate "count-data" to be used with 
+populate_index <- rep(1:nrow(coordinates),times=w)
+dummy_data <- coordinates[populate_index,]
+
+# --------------------------------------------------------------
+####
+# make sdcSpatial object and apply protection
+r <- raster::raster(
+  nrows = 101,
+  ncols = 101,
+  xmn = 0.5,
+  xmx = 101.5,
+  ymn = 0.5,
+  ymx = 101.5
+)
+pop_raster <- sdcSpatial::sdc_raster(dummy_data,
+                                    variable = 1, r = r,
+                                    min_count = 5)
+
+pal <- rev(viridis::viridis(10)) 
+plot(pop_raster, value = "count", col = pal)
+```
+
+
+Apply protection methods like before
+
+```{r}
+# apply protection
+protect_rm <- remove_sensitive(x = pop_raster, min_count = 5)
+protect_qt1 <- protect_quadtree(x = pop_raster, min_count = 5, max_zoom = 2)
+protect_qt2 <- protect_quadtree(x = pop_raster, min_count = 5, max_zoom = 3)
+protect_smooth <- protect_smooth(x = pop_raster, bw = 1)
+```
+
+```{r}
+par(mfrow = c(2, 2))
+
+plot(protect_rm, value = "count", col = pal, sensitive = FALSE)
+plot(protect_qt1, value = "count", col = pal, sensitive = FALSE)
+plot(protect_qt2, value = "count", col = pal, sensitive = FALSE)
+plot(protect_smooth, value = "count", col = pal, sensitive = FALSE)
+par(mfrow = c(1, 1))
+```
+
+
+Calculate KWD using whole map `compareOneToOne()`
+
+```{r, results='hide'}
+# --------------------------------------------------------------
+####
+# apply KWD 
+xy <- raster::xyFromCell(pop_raster$value$count, 1:raster::ncell(pop_raster$value$count))
+w_orig <- raster::getValues(pop_raster$value$count)
+w_rm <- raster::getValues(protect_rm$value$count)
+w_qt1 <- raster::getValues(protect_qt1$value$count)
+w_qt2 <- raster::getValues(protect_qt2$value$count)
+w_smooth <- raster::getValues(protect_smooth$value$count)
+
+w_orig[is.na(w_orig)] <- 0
+w_rm[is.na(w_rm)] <- 0
+w_qt1[is.na(w_qt1)] <- 0
+w_qt2[is.na(w_qt2)] <- 0
+w_smooth[is.na(w_smooth)] <- 0
+
+protected_weights <- list(w_rm,w_qt1,w_qt2,w_smooth)
+names(protected_weights) <- c("removal","quadtree1","quadtree2","smoothing")
+
+# apply compareOneToOne
+kwd_all <- rep(0,4)
+names(kwd_all) <- names(protected_weights)
+for(n in names(protected_weights)){
+  
+  weights <- cbind(protected_weights[[n]],w_orig)
+  unbalanced <- abs(sum(weights[,1]) - sum(weights[,2]))>1e-10
+  unbal_cost <- sqrt(2)*grid_width
+  
+  kwd_all[[n]] <- compareOneToOne(xy,
+                                  Weights = weights,
+                                  method = "exact",unbalanced = TRUE,
+                                  unbal_cost = unbal_cost)$distance
+
+}
+```
+
+
+These values should be somewhat comparable to the distances when applying `focusArea()` with a large enough radius 
+
+```{r}
+kwd_all
+```
+
+
+Next we apply tthe function `focusArea()` with increasig radius, starting with radius 10 (inside inner square) and moving the edge of the whole map (radius=50).
+The output of `focusArea()` is not normalised like `compareOneToOne()` so we also calculate a normalised distance by dividing the distance by the original sum of weights inside the focus area (`distance_norm`).
+
+```{r, results='hide'}
+# apply focus areas
+# start with smaller focus-area and increase
+kwd_focus <- list()
+for(r in 10:50){
+  for(n in names(protected_weights)){
+    
+    weights <- cbind(protected_weights[[n]],w_orig)
+    xy_in_focus <- xy[,"x"] %between% c(51-r,51+r) &
+      xy[,"y"] %between% c(51-r,51+r)
+    pop_in_focus <- sum(w_orig[xy_in_focus]) 
+    
+    kwd_rn <- focusArea(xy, Weights = weights, area ="Inf",
+                        x = 51, y = 51, radius = r, method = "exact")$distance
+    kwd_rn <- data.table(r = r,
+                         method = n,
+                         distance = kwd_rn,
+                         distance_norm = kwd_rn/pop_in_focus)
+    kwd_focus <- c(kwd_focus,list(kwd_rn))
+  }
+}
+
+kwd_focus <- rbindlist(kwd_focus)
+```
+
+
+Ploting the distance over radius and by `method` shows for `quadtree1` and `quadtree2` an expected increase in distance. Thats because with increasing radius more of the protected cells, and modified, cells get into the focus area and need to be adressed.
+Looking at `removal` we also see an expected pattern. at the beginning the Mass can be shifted inside the inner circle to compensate the removal, but with increasing radius of the focus area the mass needs to be taken from the outer bound yielding a large increase in the distance. The increase starting from `r=40` is also explainable because the outter bound begins to be part of the focus area and mass needs to be shifted from even further away. The drop to 0 starting with `r=45` can only be explained if the method could not find a solution because of mass-miss-match and thus retourned a 0.
+
+Looking at method `smoothing` shows that depending on `r` the calculated distance jumps up and down and is most of the times 0. Initialising the dummy data using a different seed can result in a completely different zig-zag pattern for method `smoothing`. There always seem to be spikes for smaller `r`  and larger `r` and 0 in between.
+
+```{r}
+ggplot(kwd_focus,aes(r,distance,group=method))+
+  geom_line(aes(color=method))+facet_grid(method~.,scales="free")
+```
+
+Interesting to note is that the smalles normalised distance for each method (excluding distance 0) does not allign with the results received from `compareOneToOne()`. 
+
+```{r}
+kwd_focus[distance_norm!=0, head(.SD[order(distance_norm)],3),by=.(method)]
+```
+
+The methods `quadtree1` and `quadtree2` yield exactly the same results for `compareOneToOne()` and `focusArea`() with `r=45` and larger which we should expect.
+For method `smoothing` we have a distance of `r kwd_focus[distance_norm!=0&method=="smoothing"][distance_norm==min(distance_norm)]$distance_norm` when using the focus Area with r=`r kwd_focus[distance_norm!=0&method=="smoothing"][distance_norm==min(distance_norm)]$r` but with `compareOneToOne()` we receive `r kwd_all["smoothing"]`.
+The differene for `removal` is even larger. We receive a distance of `r kwd_focus[distance_norm!=0&method=="removal"][distance_norm==min(distance_norm)]$distance_norm` with `focusArea()` but `r kwd_all["removal"]` with `compareOneToOne()`.
+
+
